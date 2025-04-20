@@ -63,21 +63,121 @@ void fs_debug()
     printf("    %d blocks\n", block.super.nblocks);
     printf("    %d inode blocks\n", block.super.ninodeblocks);
     printf("    %d inodes\n", block.super.ninodes);
+
+    for (int i = 0; i < block.super.ninodeblocks; i++) {
+        union fs_block inode_block;
+        disk_read(i + 1, inode_block.data);
+        for (int j = 0; j < INODES_PER_BLOCK; j++) {
+            int inumber = i * INODES_PER_BLOCK + j;
+            if (inumber >= block.super.ninodes) break;
+
+            struct fs_inode *inode = &inode_block.inode[j];
+            if (inode->isvalid) {
+                printf("inode %d:\n", inumber);
+                printf("    size: %d bytes\n", inode->size);
+                printf("    direct blocks:");
+                for (int k = 0; k < POINTERS_PER_INODE; k++) {
+                    if (inode->direct[k])
+                        printf(" %d", inode->direct[k]);
+                }
+                printf("\n");
+
+                if (inode->indirect) {
+                    printf("    indirect block: %d\n", inode->indirect);
+                    union fs_block indirect_block;
+                    disk_read(inode->indirect, indirect_block.data);
+                    printf("    indirect data blocks:");
+                    for (int k = 0; k < POINTERS_PER_BLOCK; k++) {
+                        if (indirect_block.pointers[k])
+                            printf(" %d", indirect_block.pointers[k]);
+                    }
+                    printf("\n");
+                }
+            }
+        }
+    }
 }
 
 int fs_format()
 {
-    return 0;
+    int nblocks = disk_size();
+    int ninodeblocks = NUM_INODE_BLOCKS(nblocks);
+    int ninodes = ninodeblocks * INODES_PER_BLOCK;
+
+    // Initialize superblock
+    union fs_block sb;
+    memset(&sb, 0, sizeof(sb));
+    sb.super.magic = FS_MAGIC;
+    sb.super.nblocks = nblocks;
+    sb.super.ninodeblocks = ninodeblocks;
+    sb.super.ninodes = ninodes;
+    disk_write(0, sb.data);
+
+    // Clear inode blocks
+    union fs_block empty_block;
+    memset(&empty_block, 0, sizeof(empty_block));
+    for (int i = 1; i <= ninodeblocks; i++) {
+        disk_write(i, empty_block.data);
+    }
+
+    return 1;
 }
+
 
 int fs_mount()
 {
-    return 0;
+    union fs_block sb;
+    disk_read(0, sb.data);
+
+    if (sb.super.magic != FS_MAGIC) return 0;
+
+    memcpy(&superblock, &sb, sizeof(sb));
+    
+    // Allocate and initialize free map
+    freemap = malloc(sizeof(int) * superblock.super.nblocks);
+    if (freemap == NULL) return 0;
+    memset(freemap, 0, sizeof(int) * superblock.super.nblocks);
+
+    // Mark reserved blocks (superblock + inode blocks)
+    for (int i = 0; i <= superblock.super.ninodeblocks; i++) {
+        freemap[i] = 1;
+    }
+
+    // Mark used data blocks
+    for (int i = 0; i < superblock.super.ninodeblocks; i++) {
+        union fs_block block;
+        disk_read(i + 1, block.data);
+
+        for (int j = 0; j < INODES_PER_BLOCK; j++) {
+            struct fs_inode *inode = &block.inode[j];
+            if (inode->isvalid) {
+                for (int k = 0; k < POINTERS_PER_INODE; k++) {
+                    if (inode->direct[k])
+                        freemap[inode->direct[k]] = 1;
+                }
+                if (inode->indirect) {
+                    freemap[inode->indirect] = 1;
+                    union fs_block indirect_block;
+                    disk_read(inode->indirect, indirect_block.data);
+                    for (int k = 0; k < POINTERS_PER_BLOCK; k++) {
+                        if (indirect_block.pointers[k])
+                            freemap[indirect_block.pointers[k]] = 1;
+                    }
+                }
+            }
+        }
+    }
+
+    return 1;
 }
 
 int fs_unmount()
 {
-    return 0;
+    if (freemap) {
+        free(freemap);
+        freemap = NULL;
+    }
+    return 1;
 }
 
 int fs_create()
