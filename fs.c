@@ -182,6 +182,25 @@ int fs_unmount()
 
 int fs_create()
 {
+    union fs_block block;
+
+    disk_read(0, block.data);
+
+    for (int i = 0; i < block.super.ninodeblocks; i++) {
+        union fs_block inode_block;
+        disk_read(i + 1, inode_block.data);
+        for (int j = 0; j < INODES_PER_BLOCK; j++) {
+            int inumber = i * INODES_PER_BLOCK + j;
+            if (inumber >= block.super.ninodes) break;
+
+            struct fs_inode *inode = &inode_block.inode[j];
+            if (inode->isvalid != 1) {
+                inode->isvalid = 1;
+                disk_write(i+1,inode_block.data);
+                return inumber;
+            }
+        }
+    }
     return -1;
 }
 
