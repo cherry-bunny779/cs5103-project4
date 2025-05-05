@@ -217,9 +217,11 @@ int fs_getsize(int inumber)
     union fs_block inode_block;
 
     disk_read(inode_block_index+1, inode_block.data);
-    if(inode_block->inode[offset].isValid){
-        inode_block->inode[offset].size;
+    struct fs_inode *inode = &inode_block.inode[inumber];
+    if(inode->isvalid){
+        return inode->size;
     }else{
+        printf("fs_getsize: inode %i not valid.\n",inumber);
         return -1;
     }
 
@@ -275,31 +277,114 @@ int fs_write(int inumber, const char *data, int length, int offset)
 
     // write data range = (offset + length)
     // calculate pointer association
-    int ptr_index = offset/DISK_BLOCK_SIZE; // if > 4, need to use indirect
-    int ptr_block_index = offset%DISK_BLOCK_SIZE;
+    int ptr_index = offset/DISK_BLOCK_SIZE; // block to start write. if > 4, need to use indirect
+    int ptr_block_index = offset%DISK_BLOCK_SIZE; // data index within start block
     int intr_index = ptr_index-5;
 
     int write_length_blks = length/DISK_BLOCK_SIZE;
-    int write_length_blks_index = (length)/DISK_BLOCK_SIZE + intr_index;
+    int write_last_blk_index = write_length_blks+intr_index+1;
     int write_length_in_blk = length%DISK_BLOCK_SIZE;
 
     // divide the data into pointers to blocks
 
     // write to first block and overflow to following blocks
+    // fix: all the disk_write are wrong
     if(ptr_index > 4){
         union fs_block indirect_block;
         union fs_block indirdata_block;
         union fs_block data_to_write;
-        disk_read(inode->indirect, indirect_block.data);
-        for(int i = intr_index;i < write_length_blks_index;i++){
-            disk_read(indirect_block.pointers[i], indirdata_block.data);
-            for(int j = ptr_block_index; j < DISK_BLOCK_SIZE; j++){ // copy first block
-                data_to_write.data[j] = data[j-ptr_block_index];
-            }
-            disk_write(i+1,inode_block.data);
+        
+        // copy and write first block
+        disk_read(indirect_block.pointers[intr_index], indirdata_block.data);
+        memcpy(data_to_write.data,indirdata_block.data,DISK_BLOCK_SIZE);
+        for(int j = ptr_block_index; j < DISK_BLOCK_SIZE; j++){
+            data_to_write.data[j] = data[j-ptr_block_index];// data starts from index 0
         }
-    } else if (ptr_index + ){
+        disk_write(data_to_write.data,indirdata_block.data);
 
+        // copy and write blocks 2 ~ n-1 
+        for(int i = intr_index+1; i < write_length_blks; i++){
+        disk_read(indirect_block.pointers[i], indirdata_block.data);
+        memcpy(data_to_write.data,indirdata_block.data,DISK_BLOCK_SIZE);
+            for(int j = 0; j < DISK_BLOCK_SIZE; j++){
+                data_to_write.data[j] = data[j-ptr_block_index];// data starts from index 0
+            }
+        disk_write(data_to_write.data,indirdata_block.data);
+        }
+
+        // copy and write last block
+        int index_in_data = ptr_block_index + DISK_BLOCK_SIZE*(write_length_blks-1);
+        disk_read(indirect_block.pointers[write_last_blk_index], indirdata_block.data);
+        memcpy(data_to_write.data,indirdata_block.data,DISK_BLOCK_SIZE);
+        for(int i = 0; i < write_length_in_blk; i++){
+            data_to_write.data[i] = data[index_in_data+i];
+        }
+        disk_write(data_to_write.data,indirdata_block.data);
+
+        // [To-do] update free-map 1. overwriting already used 2. writing to unused blocks (need allocation)
+        // but no allocation above?
+
+    } else if ((ptr_index + write_length_blks) > 4){
+        union fs_block indirect_block;
+        union fs_block indirdata_block;
+        union fs_block data_to_write;
+        
+        // copy and write first block
+        disk_read(indirect_block.pointers[intr_index], indirdata_block.data);
+        memcpy(data_to_write.data,indirdata_block.data,DISK_BLOCK_SIZE);
+        for(int j = ptr_block_index; j < DISK_BLOCK_SIZE; j++){
+            data_to_write.data[j] = data[j-ptr_block_index];// data starts from index 0
+        }
+        disk_write(data_to_write.data,indirdata_block.data);
+
+        // copy and write blocks 2 ~ n-1 
+        for(int i = intr_index+1; i < write_length_blks; i++){
+        disk_read(indirect_block.pointers[i], indirdata_block.data);
+        memcpy(data_to_write.data,indirdata_block.data,DISK_BLOCK_SIZE);
+            for(int j = 0; j < DISK_BLOCK_SIZE; j++){
+                data_to_write.data[j] = data[j-ptr_block_index];// data starts from index 0
+            }
+        disk_write(data_to_write.data,indirdata_block.data);
+        }
+
+        // copy and write last block
+        int index_in_data = ptr_block_index + DISK_BLOCK_SIZE*(write_length_blks-1);
+        disk_read(indirect_block.pointers[write_last_blk_index], indirdata_block.data);
+        memcpy(data_to_write.data,indirdata_block.data,DISK_BLOCK_SIZE);
+        for(int i = 0; i < write_length_in_blk; i++){
+            data_to_write.data[i] = data[index_in_data+i];
+        }
+        disk_write(data_to_write.data,indirdata_block.data);
+    } else {
+        union fs_block direct_data_block;
+        union fs_block data_to_write;
+        
+        // copy and write first block
+        disk_read(inode->direct[ptr_index], direct_data_block.data);
+        memcpy(data_to_write.data,direct_data_block.data,DISK_BLOCK_SIZE);
+        for(int j = ptr_block_index; j < DISK_BLOCK_SIZE; j++){
+            data_to_write.data[j] = data[j-ptr_block_index];// data starts from index 0
+        }
+        disk_write(data_to_write.data,direct_data_block.data);
+
+        // copy and write blocks 2 ~ n-1 
+        for(int i = ptr_index+1; i < write_length_blks; i++){
+        disk_read(inode->direct[i], direct_data_block.data);
+        memcpy(data_to_write.data,direct_data_block.data,DISK_BLOCK_SIZE);
+            for(int j = 0; j < DISK_BLOCK_SIZE; j++){
+                data_to_write.data[j] = data[j-ptr_block_index];// data starts from index 0
+            }
+        disk_write(data_to_write.data,direct_data_block.data);
+        }
+
+        // copy and write last block
+        int index_in_data = ptr_block_index + DISK_BLOCK_SIZE*(write_length_blks-1);
+        disk_read(inode->direct[ptr_index+write_length_blks+1], direct_data_block.data);
+        memcpy(data_to_write.data,direct_data_block.data,DISK_BLOCK_SIZE);
+        for(int i = 0; i < write_length_in_blk; i++){
+            data_to_write.data[i] = data[index_in_data+i];
+        }
+        disk_write(data_to_write.data,direct_data_block.data);
     }
 
     return 0;
