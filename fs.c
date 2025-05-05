@@ -216,7 +216,77 @@ int fs_getsize(int inumber)
 
 int fs_read(int inumber, char *data, int length, int offset)
 {
-    return 0;
+    // check valid inumber
+    if (inumber < 0 || inumber >= superblock.super.ninodes)
+        return 0;
+
+    int block_num = 1 + inumber / INODES_PER_BLOCK;
+    int inode_index = inumber % INODES_PER_BLOCK;
+
+    union fs_block block;
+    disk_read(block_num, block.data);
+    struct fs_inode *inode = &block.inode[inode_index];
+
+    // check if inode is valid
+    if (!inode->isvalid)
+        return 0;
+
+    //  offset too big
+    if (offset >= inode->size)
+        return 0;
+
+    // set len
+    if (offset + length > inode->size)
+        length = inode->size - offset;
+
+    int bytes_read = 0;
+    int start_block = offset / DISK_BLOCK_SIZE;
+    int start_offset = offset % DISK_BLOCK_SIZE;
+
+    // read from direct blocks first
+    for (int i = start_block; i < POINTERS_PER_INODE && bytes_read < length; i++) {
+        if (inode->direct[i] == 0)
+            break;
+
+        union fs_block data_block;
+        disk_read(inode->direct[i], data_block.data);
+
+        int copy_start = (i == start_block) ? start_offset : 0;
+        int copy_len = DISK_BLOCK_SIZE - copy_start;
+        if (copy_len > length - bytes_read)
+            copy_len = length - bytes_read;
+
+        memcpy(data + bytes_read, data_block.data + copy_start, copy_len);
+        bytes_read += copy_len;
+    }
+
+    // If needed, read from indirect block
+    if (bytes_read < length && inode->indirect) {
+        union fs_block indirect_block;
+        disk_read(inode->indirect, indirect_block.data);
+
+        for (int i = 0; i < POINTERS_PER_BLOCK && bytes_read < length; i++) {
+            int logical_block = POINTERS_PER_INODE + i;
+            if ((offset / DISK_BLOCK_SIZE) > logical_block)
+                continue;
+
+            if (indirect_block.pointers[i] == 0)
+                break;
+
+            union fs_block data_block;
+            disk_read(indirect_block.pointers[i], data_block.data);
+
+            int copy_start = (logical_block == offset / DISK_BLOCK_SIZE) ? start_offset : 0;
+            int copy_len = DISK_BLOCK_SIZE - copy_start;
+            if (copy_len > length - bytes_read)
+                copy_len = length - bytes_read;
+
+            memcpy(data + bytes_read, data_block.data + copy_start, copy_len);
+            bytes_read += copy_len;
+        }
+    }
+
+    return bytes_read;
 }
 
 int fs_write(int inumber, const char *data, int length, int offset)
