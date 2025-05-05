@@ -238,6 +238,12 @@ the process. Return the number of bytes actually written. The number of bytes ac
 written could be smaller than the number of bytes request, perhaps if the disk becomes
 full. If the given inumber is invalid, or any other error is encountered, return 0.
 */
+
+/* [To-do] 
+    1. update free-map 1.1 overwriting already used 1.2 writing to unused blocks (need allocation)
+        but no allocation above?
+    2. update size
+*/
 int fs_write(int inumber, const char *data, int length, int offset)
 {
     // read superblock
@@ -320,9 +326,6 @@ int fs_write(int inumber, const char *data, int length, int offset)
             data_to_write.data[i] = data[index_in_data+i];
         }
         disk_write(data_to_write.data,indirdata_block.data);
-
-        // [To-do] update free-map 1. overwriting already used 2. writing to unused blocks (need allocation)
-        // but no allocation above?
 
     } else if ((ptr_index + write_length_blks) > 4){
         union fs_block indirect_block;
