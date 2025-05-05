@@ -12,6 +12,7 @@
 #define INODES_PER_BLOCK 128
 #define POINTERS_PER_INODE 5
 #define POINTERS_PER_BLOCK 1024
+#define MAX_FILE_SIZE 4214784
 
 // Returns the number of dedicated inode blocks given the disk size in blocks
 #define NUM_INODE_BLOCKS(disk_size_in_blocks) (1 + (disk_size_in_blocks / 10))
@@ -211,7 +212,17 @@ int fs_delete(int inumber)
 
 int fs_getsize(int inumber)
 {
-    return -1;
+    int inode_block_index = inumber/INODES_PER_BLOCK;
+    int offset = inumber%INODES_PER_BLOCK;
+    union fs_block inode_block;
+
+    disk_read(inode_block_index+1, inode_block.data);
+    if(inode_block->inode[offset].isValid){
+        inode_block->inode[offset].size;
+    }else{
+        return -1;
+    }
+
 }
 
 int fs_read(int inumber, char *data, int length, int offset)
@@ -219,7 +230,77 @@ int fs_read(int inumber, char *data, int length, int offset)
     return 0;
 }
 
+/* Write data to a valid inode. Copy "length" bytes from the pointer "data" into
+the inode starting at "offset" bytes. Allocate any necessary direct and indirect blocks in
+the process. Return the number of bytes actually written. The number of bytes actually
+written could be smaller than the number of bytes request, perhaps if the disk becomes
+full. If the given inumber is invalid, or any other error is encountered, return 0.
+*/
 int fs_write(int inumber, const char *data, int length, int offset)
 {
+    // read superblock
+    union fs_block block;
+
+    disk_read(0, block.data);
+
+    // check inumber in bounds
+    if(inumber > (block.super.ninodeblocks*INODES_PER_BLOCK) || inumber < 0){
+        printf("fs_write: inumber out of bounds for i=%i\n",inumber);
+        return 0;
+    }
+
+    // index the inode
+    //int iblock_index = inumber%INODES_PER_BLOCK;
+    //int iblock = inumber/INODES_PER_BLOCK;
+    // read inode entry
+    union fs_block inode_block;
+    disk_read(inumber/INODES_PER_BLOCK + 1, inode_block.data);
+    struct fs_inode *inode = &inode_block.inode[inumber%INODES_PER_BLOCK];
+
+    // check inode valid
+    if(!(inode->isvalid)){
+        printf("fs_write: target inode not valid, create inode first\n");
+        return 0;
+    }
+    // check write size
+    if(inode->size + length > MAX_FILE_SIZE){
+        printf("fs_write: write too large. write aborted\n");
+        return 0;
+    }
+    // check write bounds
+    if(offset + length > MAX_FILE_SIZE){
+        printf("fs_write: write out of bounds. write aborted\n");
+        return 0;
+    }
+
+    // write data range = (offset + length)
+    // calculate pointer association
+    int ptr_index = offset/DISK_BLOCK_SIZE; // if > 4, need to use indirect
+    int ptr_block_index = offset%DISK_BLOCK_SIZE;
+    int intr_index = ptr_index-5;
+
+    int write_length_blks = length/DISK_BLOCK_SIZE;
+    int write_length_blks_index = (length)/DISK_BLOCK_SIZE + intr_index;
+    int write_length_in_blk = length%DISK_BLOCK_SIZE;
+
+    // divide the data into pointers to blocks
+
+    // write to first block and overflow to following blocks
+    if(ptr_index > 4){
+        union fs_block indirect_block;
+        union fs_block indirdata_block;
+        union fs_block data_to_write;
+        disk_read(inode->indirect, indirect_block.data);
+        for(int i = intr_index;i < write_length_blks_index;i++){
+            disk_read(indirect_block.pointers[i], indirdata_block.data);
+            for(int j = ptr_block_index; j < DISK_BLOCK_SIZE; j++){ // copy first block
+                data_to_write.data[j] = data[j-ptr_block_index];
+            }
+            disk_write(i+1,inode_block.data);
+        }
+    } else if (ptr_index + ){
+
+    }
+
     return 0;
 }
