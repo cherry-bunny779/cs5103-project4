@@ -211,7 +211,19 @@ int fs_delete(int inumber)
 
 int fs_getsize(int inumber)
 {
-    return -1;
+    int inode_block_index = inumber/INODES_PER_BLOCK;
+    int offset = inumber%INODES_PER_BLOCK;
+    union fs_block inode_block;
+
+    disk_read(inode_block_index+1, inode_block.data);
+    struct fs_inode *inode = &inode_block.inode[inumber];
+    if(inode->isvalid){
+        return inode->size;
+    }else{
+        printf("fs_getsize: inode %i not valid.\n",inumber);
+        return -1;
+    }
+
 }
 
 int fs_read(int inumber, char *data, int length, int offset)
