@@ -12,6 +12,7 @@
 #define INODES_PER_BLOCK 128
 #define POINTERS_PER_INODE 5
 #define POINTERS_PER_BLOCK 1024
+#define MAX_FILE_SIZE 4214784
 
 // Returns the number of dedicated inode blocks given the disk size in blocks
 #define NUM_INODE_BLOCKS(disk_size_in_blocks) (1 + (disk_size_in_blocks / 10))
@@ -261,7 +262,7 @@ int fs_delete(int inumber)
 int fs_getsize(int inumber)
 {
     int inode_block_index = inumber/INODES_PER_BLOCK;
-    int offset = inumber%INODES_PER_BLOCK;
+    // int offset = inumber%INODES_PER_BLOCK;
     union fs_block inode_block;
 
     disk_read(inode_block_index+1, inode_block.data);
@@ -273,6 +274,21 @@ int fs_getsize(int inumber)
         return -1;
     }
 
+}
+
+/* 
+   Helper function to find empty space on disk
+   populate from lower indices, return first empty
+   index. if no empty space, return -1
+*/
+int find_empty_block(){
+    
+    for(int i = 0; i < superblock.super.nblocks; i++){
+        if(freemap[i] == 0){
+            return i;
+        }
+    }
+    return -1;
 }
 
 int fs_read(int inumber, char *data, int length, int offset)
@@ -352,5 +368,278 @@ int fs_read(int inumber, char *data, int length, int offset)
 
 int fs_write(int inumber, const char *data, int length, int offset)
 {
-    return 0;
+    // read superblock
+    union fs_block block;
+
+    disk_read(0, block.data);
+
+    // check inumber in bounds
+    if(inumber > (block.super.ninodeblocks*INODES_PER_BLOCK) || inumber < 0){
+        printf("fs_write: inumber out of bounds for i=%i\n",inumber);
+        return 0;
+    }
+
+    // read inode entry
+    union fs_block inode_block;
+    disk_read(inumber/INODES_PER_BLOCK + 1, inode_block.data);
+    struct fs_inode *inode = &inode_block.inode[inumber];
+
+    // [To-do] Write updated inode info back to disk
+    // check inode valid
+    if(!(inode->isvalid)){
+        printf("fs_write: target inode not valid, create inode first\n");
+        return 0;
+    }
+    // check write size
+    if(inode->size + length > MAX_FILE_SIZE){
+        printf("fs_write: write too large. write aborted\n");
+        return 0;
+    }
+    // check write bounds
+    if(offset + length > MAX_FILE_SIZE){
+        printf("fs_write: write out of bounds. write aborted\n");
+        return 0;
+    }
+
+    // write data range = (offset + length)
+    // calculate pointer association
+    int ptr_index = offset/DISK_BLOCK_SIZE; // block to start write. if > 4, need to use indirect
+    int ptr_block_index = offset%DISK_BLOCK_SIZE; // data index within start block
+    int intr_index = ptr_index-5;
+
+    int write_length_blks = length/DISK_BLOCK_SIZE;
+    int write_last_blk_index = write_length_blks+intr_index+1;
+    int write_length_in_blk = length%DISK_BLOCK_SIZE;
+
+    int index_in_wdata = 0;
+
+    // Three cases of write; 1. all in direct pointer blocks 2. start in dp blocks and extend to idp 3. all in idp
+
+    // write to first block and overflow to following blocks
+    if(ptr_index > 4){
+        union fs_block indirect_block;
+        union fs_block indirdata_block;
+        //union fs_block data_to_write;
+        
+        if(inode->indirect != 0){
+            disk_read(inode->indirect,indirect_block.data);
+
+            // copy and write first block
+            // for()
+            for(int i = 0; i < 1024; i++){
+                if(freemap[indirect_block.pointers[i]] == 1){
+                    disk_read(indirect_block.pointers[i], indirdata_block.data);
+                    for(int j = 0; (j < DISK_BLOCK_SIZE) && (index_in_wdata < length); j++){
+                        indirdata_block.data[j] = data[index_in_wdata];
+                        index_in_wdata++;
+                    }
+                } else { // if file does not already have content in indirect, allocate new blocks
+                    int freeblock = find_empty_block();
+                    if(freeblock == -1){
+                        printf("fs_write: disk full (indirect op). aborting operation 3\n");
+                        return 0;
+                    }
+                    indirect_block.pointers[i] = freeblock;
+                    for(int j = 0; (j < DISK_BLOCK_SIZE) && (index_in_wdata < length); j++){
+                        indirdata_block.data[j] = data[index_in_wdata];
+                        index_in_wdata++;
+                    }
+                    inode->size += DISK_BLOCK_SIZE;
+                }
+                disk_write(indirect_block.pointers[i],indirdata_block.data);
+            }
+        } else { // construct indirect block array if doesnt exist
+            int freeblock = find_empty_block();
+            if(freeblock == -1){
+                printf("fs_write: disk full (indirect array). aborting operation 4\n");
+                return 0;
+            }
+            inode->indirect = freeblock;
+
+            // create indirect blocks and write data
+            for(int i = 0; (i < POINTERS_PER_BLOCK) && (index_in_wdata < length); i++){
+                freeblock = find_empty_block();
+                    if(freeblock == -1){
+                        printf("fs_write: disk full (indirect op). aborting operation 3\n");
+                        return 0;
+                    }
+                    indirect_block.pointers[i] = freeblock;
+                    for(int j = 0; (j < DISK_BLOCK_SIZE) && (index_in_wdata < length); j++){
+                        indirdata_block.data[j] = data[index_in_wdata];
+                        index_in_wdata++;
+                    }
+                    inode->size += DISK_BLOCK_SIZE;
+            }
+
+        }
+
+    } else if ((ptr_index + write_length_blks) > 4){
+        union fs_block indirect_ptr_block;
+        union fs_block indirdata_block;
+        union fs_block data_to_write;
+        
+        // start in direct pointer space
+        union fs_block direct_data_block;
+        // copy first block
+        if(freemap[ptr_index] == 1){
+            disk_read(inode->direct[ptr_index], data_to_write.data);
+            for(int j = ptr_block_index; j < DISK_BLOCK_SIZE; j++){
+                data_to_write.data[j] = data[j-ptr_block_index]; // data starts from index 0
+                index_in_wdata++;
+            }
+            disk_write(inode->direct[ptr_index],data_to_write.data);
+        } else {
+            freemap[ptr_index] = 1;
+            int freeblock = find_empty_block();
+            if(freeblock == -1){
+                printf("fs_write: disk full. aborting operation 1\n");
+                return 0;
+            }
+            inode->direct[ptr_index] = freeblock;
+            for(int j = ptr_block_index; j < DISK_BLOCK_SIZE; j++){
+                data_to_write.data[j] = data[j-ptr_block_index];
+                index_in_wdata++;
+            }
+            // [To-do] when block not in use, need to zero index[0] to index[ptr_index-1] ?
+            disk_write(inode->direct[0],data_to_write.data);
+            inode->size += DISK_BLOCK_SIZE;
+        }
+
+        // copy direct blocks ptr_index+1 ~ 4
+        for(int i = ptr_index+1; i < 5; i++){
+            if(freemap[i] == 1){
+                disk_read(inode->direct[i], data_to_write.data);
+                for(int j = 0; j < DISK_BLOCK_SIZE; j++){
+                    data_to_write.data[j] = data[index_in_wdata];
+                    index_in_wdata++;
+                }
+                disk_write(inode->direct[i],data_to_write.data);
+            } else { // allocate a non-populated direct pointer
+                freemap[ptr_index] = 1;
+                int freeblock = find_empty_block();
+                if(freeblock == -1){
+                    printf("fs_write: disk full. aborting operation 2\n");
+                    return 0;
+                }
+                inode->direct[i] = freeblock;
+                for(int j = 0; j < DISK_BLOCK_SIZE; j++){
+                    data_to_write.data[j] = data[index_in_wdata];
+                    index_in_wdata++;
+                }
+                disk_write(inode->direct[i],data_to_write.data);
+                inode->size += DISK_BLOCK_SIZE;
+            }
+        }
+
+        // copy indirect blocks
+        int indirect_block_range = ptr_index + ((length-(offset%DISK_BLOCK_SIZE))%DISK_BLOCK_SIZE) - 5;
+        if(inode->indirect != 0){
+            disk_read(inode->indirect,indirect_ptr_block.data);
+            for(int i = 0; i < indirect_block_range; i++){
+                if(freemap[indirect_ptr_block.pointers[i]] == 1){
+                    disk_read(indirect_ptr_block.pointers[i], indirdata_block.data);
+                    for(int j = 0; (j < DISK_BLOCK_SIZE) && (index_in_wdata < length); j++){
+                        indirdata_block.data[j] = data[index_in_wdata];
+                        index_in_wdata++;
+                    }
+                } else { // if file does not already have content in indirect, allocate new blocks
+                    int freeblock = find_empty_block();
+                    if(freeblock == -1){
+                        printf("fs_write: disk full (indirect op). aborting operation 3\n");
+                        return 0;
+                    }
+                    indirect_ptr_block.pointers[i] = freeblock;
+                    for(int j = 0; (j < DISK_BLOCK_SIZE) && (index_in_wdata < length); j++){
+                        indirdata_block.data[j] = data[index_in_wdata];
+                        index_in_wdata++;
+                    }
+                    inode->size += DISK_BLOCK_SIZE;
+                }
+                disk_write(indirect_ptr_block.pointers[i],indirdata_block.data);
+            }
+        } else { // construct indirect block array
+            int freeblock = find_empty_block();
+            if(freeblock == -1){
+                printf("fs_write: disk full (indirect array). aborting operation 4\n");
+                return 0;
+            }
+            inode->indirect = freeblock;
+
+            // create indirect blocks and write data
+            for(int i = 0; (i < indirect_block_range) && (index_in_wdata < length); i++){
+                freeblock = find_empty_block();
+                    if(freeblock == -1){
+                        printf("fs_write: disk full (indirect op). aborting operation 3\n");
+                        return 0;
+                    }
+                    indirect_ptr_block.pointers[i] = freeblock;
+                    for(int j = 0; (j < DISK_BLOCK_SIZE) && (index_in_wdata < length); j++){
+                        indirdata_block.data[j] = data[index_in_wdata];
+                        index_in_wdata++;
+                    }
+                    inode->size += DISK_BLOCK_SIZE;
+            }
+
+        }
+    } else { // case where all data writes destinations are in direct blocks
+        union fs_block direct_data_block;
+        union fs_block data_to_write;
+
+        // copy first block
+        if(freemap[ptr_index] == 1){
+            disk_read(inode->direct[ptr_index], data_to_write.data);
+            for(int j = ptr_block_index; (j < DISK_BLOCK_SIZE) && (index_in_wdata < length); j++){
+                data_to_write.data[j] = data[j-ptr_block_index]; // data starts from index 0
+                index_in_wdata++;
+            }
+            disk_write(inode->direct[ptr_index],data_to_write.data);
+        } else {
+            freemap[ptr_index] = 1;
+            int freeblock = find_empty_block();
+            if(freeblock == -1){
+                printf("fs_write: disk full. aborting operation 5\n");
+                return 0;
+            }
+            inode->direct[ptr_index] = freeblock;
+            for(int j = ptr_block_index; (j < DISK_BLOCK_SIZE) && (index_in_wdata < length); j++){
+                data_to_write.data[j] = data[j-ptr_block_index];
+                index_in_wdata++;
+            }
+            // [To-do] when block not in use, need to zero index[0] to index[ptr_index-1] ?
+            disk_write(inode->direct[0],data_to_write.data);
+            inode->size += DISK_BLOCK_SIZE;
+        }
+
+        // copy remaining blocks
+        if(index_in_wdata < length){
+            for(int i = ptr_index+1; (i < 5) && (index_in_wdata < length); i++){
+                if(freemap[i] == 1){
+                    disk_read(inode->direct[i], data_to_write.data);
+                    for(int j = 0; (j < DISK_BLOCK_SIZE) && (index_in_wdata < length); j++){
+                        data_to_write.data[j] = data[index_in_wdata];
+                        index_in_wdata++;
+                    }
+                    disk_write(inode->direct[i],data_to_write.data);
+                } else { // allocate a non-populated direct pointer
+                    freemap[ptr_index] = 1;
+                    int freeblock = find_empty_block();
+                    if(freeblock == -1){
+                        printf("fs_write: disk full. aborting operation 2\n");
+                        return 0;
+                    }
+                    inode->direct[i] = freeblock;
+                    for(int j = 0; (j < DISK_BLOCK_SIZE) && (index_in_wdata < length); j++){
+                        data_to_write.data[j] = data[index_in_wdata];
+                        index_in_wdata++;
+                    }
+                    disk_write(inode->direct[i],data_to_write.data);
+                    inode->size += DISK_BLOCK_SIZE;
+                }
+            }
+        }
+    }
+
+    disk_write(inumber/INODES_PER_BLOCK + 1, inode_block.data);
+    return 1;
+
 }
