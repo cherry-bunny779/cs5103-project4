@@ -206,7 +206,56 @@ int fs_create()
 
 int fs_delete(int inumber)
 {
-    return 0;
+    // check if legal inode number
+    if (inumber < 0 || inumber >= superblock.super.ninodes){
+        //printf("invalid inum");
+        return 0;
+    }
+
+    int block_num = 1 + inumber / INODES_PER_BLOCK;
+    int inode_index = inumber % INODES_PER_BLOCK;
+    union fs_block block;
+    disk_read(block_num, block.data);
+
+    struct fs_inode *inode = &block.inode[inode_index];
+
+    // Check if inode is currently in use
+    if (!inode->isvalid){
+        //printf("Failed in isvalid check");
+        return 0;
+    }
+
+    // free direct blocks
+    for (int i = 0; i < POINTERS_PER_INODE; i++) {
+        if (inode->direct[i]) {
+            freemap[inode->direct[i]] = 0;
+            inode->direct[i] = 0;
+        }
+    }
+
+    // free indirect blocks
+    if (inode->indirect) {
+        union fs_block indirect_block;
+        disk_read(inode->indirect, indirect_block.data);
+
+        for (int i = 0; i < POINTERS_PER_BLOCK; i++) {
+            if (indirect_block.pointers[i]) {
+                freemap[indirect_block.pointers[i]] = 0;
+            }
+        }
+
+        freemap[inode->indirect] = 0;
+        inode->indirect = 0;
+    }
+
+    // empty node
+    inode->isvalid = 0;
+    inode->size = 0;
+
+    // Write back empty block to persist changes
+    disk_write(block_num, block.data);
+
+    return 1;
 }
 
 int fs_getsize(int inumber)
