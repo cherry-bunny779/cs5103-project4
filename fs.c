@@ -53,6 +53,8 @@ static union fs_block superblock;
  *          printf("Block 123 is NOT free\n");
 */
 static int *freemap = 0;
+static int fs_mounted = 0; // don't format if mounted
+
 
 void fs_debug()
 {
@@ -101,17 +103,22 @@ void fs_debug()
 
 int fs_format()
 {
+    if (fs_mounted) {
+        printf("ERROR: cannot format while filesystem is mounted.\n");
+        return 0;
+    }
+
     int nblocks = disk_size();
     int ninodeblocks = NUM_INODE_BLOCKS(nblocks);
     int ninodes = ninodeblocks * INODES_PER_BLOCK;
 
-    // Initialize superblock
+    // init superblock
     union fs_block sb;
     memset(&sb, 0, sizeof(sb));
     sb.super.magic = FS_MAGIC;
+    sb.super.ninodes = ninodes;
     sb.super.nblocks = nblocks;
     sb.super.ninodeblocks = ninodeblocks;
-    sb.super.ninodes = ninodes;
     disk_write(0, sb.data);
 
     // Clear inode blocks
@@ -136,17 +143,17 @@ int fs_mount()
 
     memcpy(&superblock, &sb, sizeof(sb));
     
-    // Allocate and initialize free map
+    // create free map
     freemap = malloc(sizeof(int) * superblock.super.nblocks);
     if (freemap == NULL) return 0;
     memset(freemap, 0, sizeof(int) * superblock.super.nblocks);
 
-    // Mark reserved blocks (superblock + inode blocks)
+    // reserve blocks for superblock and inode blocks in freemap
     for (int i = 0; i <= superblock.super.ninodeblocks; i++) {
         freemap[i] = 1;
     }
 
-    // Mark used data blocks
+    // find and mark any used data blocks
     for (int i = 0; i < superblock.super.ninodeblocks; i++) {
         union fs_block block;
         disk_read(i + 1, block.data);
@@ -170,7 +177,7 @@ int fs_mount()
             }
         }
     }
-
+    fs_mounted = 1;
     return 1;
 }
 
@@ -180,11 +187,13 @@ int fs_unmount()
         free(freemap);
         freemap = NULL;
     }
+    fs_mounted = 0;
     return 1;
 }
 
 int fs_create()
-{
+{ 
+    // loops thru inodes until it finds a free one
     for (int i = 0; i < superblock.super.ninodeblocks; i++) {
         union fs_block inode_block;
         disk_read(i + 1, inode_block.data);
